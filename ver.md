@@ -8,6 +8,79 @@
 
 ## 版本歷史
 
+### v1.6.0 - 穩定性強化版 ✅
+**檔案**: `rgidlightcontrol/rgidlightcontrol.ino` (現行主程式)
+**日期**: 2025-08-28
+**狀態**: 連線與讀卡穩定性全面強化（已用 arduino-cli 編譯驗證，1.08MB / 51%）
+
+#### 🐛 Bug 修正（重要）
+- **WiFi 永遠離線 Bug**: 原本開機時所有 WiFi 都連不上的話，之後永遠不會再重試
+  （重連邏輯只在「曾連線過」時觸發）。現改為離線時每 60 秒定期重試。
+- **非 NDEF 卡片當機 Bug**: 空白卡 / 一般感應卡靠近時，`getNdefMessage()` 會解參考
+  NULL 指標導致 ESP32 當機重啟。現先以 `hasNdefMessage()` 檢查。
+
+#### 連線穩定性強化
+- `WiFi.setAutoReconnect(true)`：底層短暫斷線自動重連，不必等 10 秒檢查週期
+- 執行期重連優先嘗試「上次成功的 SSID」，避免每次都從頭掃 4 組帳密（最壞阻塞 60 秒）
+- 心跳發送失敗即標記 `mqttConnected = false`，下一輪檢查（≤10 秒）立即重連
+
+#### 讀卡穩定性強化
+- `tagPresent(100)`：原預設每次輪詢可阻塞近 1 秒，拖慢主迴圈與 MQTT keepalive；
+  縮短為 100ms 後迴圈更順、讀卡反應更快
+- 讀取失敗先快速重試 2 次（間隔 100ms）再進冷卻，提升卡片邊緣的一次刷成功率
+- 連續讀取失敗 5 次自動重新初始化 PN532（防模組卡死，免人工斷電）
+- `getPayloadAsString()` 防 payload 長度為 0 的越界讀取
+
+#### 新增參數
+```cpp
+const unsigned long WIFI_RETRY_INTERVAL = 60000;  // WiFi 離線定期重試間隔
+const unsigned long NFC_POLL_TIMEOUT = 100;       // tagPresent 輪詢逾時 (ms)
+const int NFC_READ_ATTEMPTS = 3;                  // 讀取嘗試次數（1 + 2 次重試）
+const int NFC_MAX_CONSECUTIVE_FAILURES = 5;       // 連續失敗達此數重新初始化 PN532
+```
+
+---
+
+### v1.5.9 - 開機進度燈版 ✅
+**檔案**: `rgidlightcontrol/rgidlightcontrol.ino` (現行主程式)
+**日期**: 2025-08-28
+**狀態**: 新增彩色開機進度指示燈、強化心跳訊息，並整理程式碼與文件
+
+#### v1.5.9 新增 / 變更項目
+- 🌈 **彩色開機進度燈**: FastLED 初始化後，依開機階段以約 20% 亮度顯示不同顏色，方便診斷卡在哪一步
+  - 🔴 紅：系統 / FastLED 基礎初始化完成
+  - 🟠 橙：I2C 匯流排就緒
+  - 🟡 黃：NFC (PN532) 就緒
+  - 🟢 綠：WiFi 連線成功
+  - 🔵 藍：MQTT 連線成功
+  - 🟣 紫：系統啟動完成
+  - 🌈 彩虹：最後閃示彩虹燈代表「開機成功」後進入待機
+- 💗 **心跳訊息強化**: `puffin-heartbeat` 除了 device/status/timestamp，再帶上 `ip`、`rssi`(訊號強度)、`ssid`
+- 🌐 **MQTT Broker 位址**: 由 `broker.MQTTGO.io` 改為 `MQTTGO.io` (port 1883 不變)
+- 🔌 **改善閒置斷線**: WiFi 連上後呼叫 `WiFi.setSleep(false)` 關閉省電模式；MQTT keepalive 由 15 秒拉長至 60 秒；心跳間隔由 60 秒改為 30 秒 (< keepalive)
+- 🧹 **程式碼整理**:
+  - 移除第 362–363 行「其餘函數省略」的誤導性註解
+  - `printStatistics()` 接上呼叫（冷卻結束時輸出累計統計）
+  - `showStartupRainbow()` 保留，改作為開機成功指示
+- 📄 **文件同步**: 更新 `CLAUDE.md`，使硬體/參數/狀態機/函式庫說明與 v1.5.9 一致
+
+#### 心跳訊息格式範例
+```json
+{"device":"ESP32_XXXX","status":"alive","ip":"192.168.1.50","rssi":-58,"ssid":"Sam","timestamp":123456}
+```
+
+#### 開機進度燈相關參數
+```cpp
+const unsigned long BOOT_STAGE_DELAY = 400;       // 每個階段顯示時間
+const unsigned long STARTUP_LIGHT_DURATION = 1000; // 開機成功彩虹燈時間
+bool bootInProgress = true;                        // 開機進度燈顯示旗標
+```
+
+> 備註：v1.5.2 ~ v1.5.8 期間的變更（如 v1.5.7 MQTT 重連保護、v1.5.8 讀取靈敏度優化）
+> 未各自建立獨立備份檔，相關說明可參考主程式檔頭的更新日誌。
+
+---
+
 ### v1.5.1 - 多 WiFi 帳密支援版本 ✅
 **檔案**: `rgidlightcontrol_v1.5.1_backup.ino`  
 **日期**: 2025-08-26  

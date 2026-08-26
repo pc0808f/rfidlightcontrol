@@ -1,46 +1,74 @@
 /**
- * NFC RFID 燈光控制系統 - v1.5.8 靈敏度優化版
- * * 版本資訊: v1.5.8 - 優化讀取靈敏度和 Record 不足處理
+ * NFC RFID 燈光控制系統 - v1.6.0 穩定性強化版
+ *
+ * 版本資訊: v1.6.0 - 連線與讀卡穩定性全面強化
  * 建立日期: 2025-08-28
- * 更新內容: 
+ * 更新內容:
  * - v1.5.7: 新增 MQTT 重連保護機制，防止狀態機重置
  * - v1.5.8: 縮短 Record 不足的冷卻時間，提升讀取靈敏度
- * - 優化標籤穩定性檢測，加快響應速度
- * - 區分不同類型錯誤的冷卻時間
- * * 已實作功能：
+ * - v1.5.9: 新增彩色開機進度指示燈 (紅→橙→黃→綠→藍→紫)
+ * - v1.5.9: 心跳訊息帶上 IP 位址與 WiFi 訊號強度 (RSSI)
+ * - v1.5.9: MQTT Broker 位址改為 MQTTGO.io
+ * - v1.5.9: 保留開機彩虹燈，改作為所有階段完成後的「開機成功」指示
+ * - v1.5.9: 關閉 WiFi 省電 (setSleep false)、keepalive 拉長至 60 秒、心跳改 30 秒，改善閒置斷線
+ * - v1.6.0: [Bug修正] 開機時 WiFi 全部失敗後，改為每 60 秒定期重試（原本會永遠離線）
+ * - v1.6.0: [Bug修正] 讀到非 NDEF 卡片時先以 hasNdefMessage() 檢查，避免解參考 NULL 當機
+ * - v1.6.0: 啟用 WiFi.setAutoReconnect，底層短暫斷線自動重連
+ * - v1.6.0: 執行期重連優先嘗試上次成功的 SSID，大幅縮短阻塞時間
+ * - v1.6.0: 心跳發送失敗即標記 MQTT 斷線，加速下一輪重連
+ * - v1.6.0: tagPresent 輪詢逾時縮短為 100ms，主迴圈更順暢、MQTT keepalive 更即時
+ * - v1.6.0: NFC 讀取失敗先快速重試 2 次再進冷卻，提升一次刷卡成功率
+ * - v1.6.0: 連續讀取失敗 5 次自動重新初始化 PN532（防模組卡死）
+ * - v1.6.0: getPayloadAsString 防 payload 長度為 0 的越界讀取
+ *
+ * 已實作功能：
  * 1. FastLED 燈條控制功能
- * 2. 開機彩虹燈光指示
+ * 2. 彩色開機進度指示燈 (依開機階段顯示不同顏色)
  * 3. 可調整參數設定
  * 4. Record 資料解析和驗證
- * 5. 燈光控制邏輯
- * 6. 完整的標籤處理流程
- * 7. WiFi 和 MQTT 連線功能
+ * 5. 燈光控制邏輯 (家族顏色)
+ * 6. 五狀態機完整標籤處理流程
+ * 7. WiFi 多帳密自動輪詢連線
  * 8. MQTT 資料發送功能 (puffin-test)
- * 9. WiFi 連線成功指示燈 (粉紅色) [新功能]
- * 10. MQTT 即時斷線重連機制 [新功能]
- * * v1.5.8 新增項目：
- * - 🔧 新增 MQTT 重連保護機制，防止干擾 NFC 檢測
- * - ⏱️  縮短標籤穩定檢測時間為 100ms，提升響應速度
- * - 🛡️  區分 Record 不足和其他錯誤的冷卻時間
- * - 🚀 Record 不足時僅冷卻 1 秒，快速重新感應
- * * 功能特色：
+ * 9. MQTT 心跳機制 (puffin-heartbeat，帶 IP / RSSI)
+ * 10. MQTT 即時斷線重連機制
+ * 11. WiFi 連線成功指示燈 (執行期重連時顯示粉紅色)
+ * 12. 待機狀態燈 (網路正常時顯示 50% 白光)
+ * 13. 標籤處理統計資訊輸出
+ *
+ * 開機進度燈說明 (皆為約 20% 亮度)：
+ * - 🔴 紅: 系統 / FastLED 基礎初始化完成
+ * - 🟠 橙: I2C 匯流排就緒
+ * - 🟡 黃: NFC (PN532) 就緒
+ * - 🟢 綠: WiFi 連線成功
+ * - 🔵 藍: MQTT 連線成功
+ * - 🟣 紫: 系統啟動完成
+ * - 🌈 彩虹: 開機成功，最後閃示一次彩虹後進入待機
+ *   (若燈光停在某個顏色未前進，代表該階段卡住，可用於診斷)
+ *
+ * 功能特色：
  * - 徹底移除對 Adafruit 函式庫的依賴，只使用 Don Coleman 的 NDEF 函式庫
  * - 手動初始化 I2C 匯流排，確保 PN532 晶片穩定運作
  * - 完整的 Record 資料驗證機制，支援多種格式
  * - 非阻塞式狀態管理，優先保證燈光準時熄滅
- * - 開機/WiFi 連線成功燈光指示
+ * - 彩色開機進度 / WiFi 連線成功 / 待機狀態燈光指示
  * - WiFi 和 MQTT 強韌連線管理
- * * 前置作業：
+ *
+ * 前置作業：
  * - 請確保已安裝 "NDEF library for Arduino by Don Coleman"
  * - 請確保已安裝 "FastLED library"
  * - 請確保已安裝 "PubSubClient library"
- * - 請在程式中設定正確的 WiFi SSID 和密碼
+ * - 請在 wifiCredentials 陣列中設定正確的 WiFi SSID 和密碼
  */
 
 #include <Wire.h>
 #include <SPI.h>
 #include <PN532_I2C.h>
 #include <NfcAdapter.h>
+// NDEF 函式庫的 NfcAdapter.h 會 #define IRQ/RESET，與 FastLED 的識別字 (RESET 欄位/列舉) 衝突，
+// 必須在引入 FastLED 前解除這兩個巨集，否則在 ESP32 core 3.x + FastLED 3.x 會編譯失敗。
+#undef IRQ
+#undef RESET
 #include <FastLED.h>
 #include <WiFi.h>          // WiFi 連線功能
 #include <PubSubClient.h>  // MQTT 通訊功能
@@ -50,7 +78,8 @@ const unsigned long LIGHT_DURATION = 15000;
 const unsigned long READ_DEBOUNCE = 3000;
 const unsigned long READ_FAIL_DEBOUNCE = 3000;  // 一般讀取失敗冷卻時間
 const unsigned long RECORD_INSUFFICIENT_DEBOUNCE = 1000;  // Record 不足冷卻時間（更短）
-const unsigned long STARTUP_LIGHT_DURATION = 1000;
+const unsigned long BOOT_STAGE_DELAY = 400;  // 每個開機進度燈階段顯示時間（毫秒）
+const unsigned long STARTUP_LIGHT_DURATION = 1000;  // 開機成功彩虹燈顯示時間（毫秒）
 
 // --- WiFi 和 MQTT 連線參數設定 ---
 struct WiFiCredential {
@@ -64,14 +93,20 @@ const WiFiCredential wifiCredentials[] = {
   {"YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD"}
 };
 const int WIFI_CREDENTIAL_COUNT = sizeof(wifiCredentials) / sizeof(wifiCredentials[0]);
-const char* MQTT_BROKER = "broker.MQTTGO.io";
+const char* MQTT_BROKER = "MQTTGO.io";
 const int MQTT_PORT = 1883;
 const char* MQTT_TOPIC = "puffin-test";
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 const unsigned long MQTT_CONNECT_TIMEOUT = 5000;
 const unsigned long CONNECTION_CHECK_INTERVAL = 10000;
-const unsigned long MQTT_KEEPALIVE_SECONDS = 15;
-const unsigned long HEARTBEAT_INTERVAL = 60000;  // 心跳間隔 60 秒
+const unsigned long MQTT_KEEPALIVE_SECONDS = 60;  // MQTT keep-alive（拉長以減少閒置斷線）
+const unsigned long HEARTBEAT_INTERVAL = 30000;  // 心跳間隔 30 秒（< keepalive，維持連線活躍）
+const unsigned long WIFI_RETRY_INTERVAL = 60000;  // WiFi 離線時的定期重試間隔（防開機失敗後永遠離線）
+
+// --- NFC 讀取穩定性參數 ---
+const unsigned long NFC_POLL_TIMEOUT = 100;    // tagPresent 輪詢逾時（毫秒），縮短以維持主迴圈順暢
+const int NFC_READ_ATTEMPTS = 3;               // NFC 讀取嘗試次數（1 次 + 2 次快速重試）
+const int NFC_MAX_CONSECUTIVE_FAILURES = 5;    // 連續讀取失敗達此次數即重新初始化 PN532
 
 // --- ESP32 預設的 I2C 接腳 ---
 const int I2C_SDA_PIN = 21;
@@ -103,6 +138,7 @@ bool isLightOn = false;
 unsigned long lightStartTime = 0;
 unsigned long stateChangeTime = 0;
 bool isIdleStatusLight = false;  // 待機狀態燈是否開啟
+bool bootInProgress = true;      // 開機進度燈顯示中（開機完成後設為 false）
 
 // --- 標籤穩定性檢測變數 ---
 bool lastTagState = false;
@@ -134,9 +170,15 @@ unsigned long lastConnectionCheck = 0;
 unsigned long wifiConnectStartTime = 0;
 unsigned long mqttConnectStartTime = 0;
 int connectedCredentialIndex = -1;
+int lastSuccessfulCredentialIndex = -1;  // 上次成功連線的帳密索引（重連時優先嘗試）
+unsigned long lastWiFiRetryAttempt = 0;  // 上次 WiFi 定期重試的時間
 unsigned long lastHeartbeat = 0;
 
+// --- NFC 穩定性變數 ---
+int consecutiveReadFailures = 0;  // 連續讀取失敗計數（達上限即重新初始化 PN532）
+
 // --- 函數宣告 ---
+void showBootProgress(CRGB color, const char* stageMsg);
 void showStartupRainbow();
 void turnOffLeds();
 void showColorLight(CRGB color);
@@ -170,52 +212,66 @@ void showIdleStatusLight();
 // =========================================================================
 void setup(void) {
   Serial.begin(115200);
-  Serial.println("\nNFC RFID 燈光控制系統 v1.5.8 (靈敏度優化版)");
+  Serial.println("\nNFC RFID 燈光控制系統 v1.6.0 (穩定性強化版)");
   Serial.println("=========================================================");
-  Serial.println("新增: MQTT 保護機制 & 讀取靈敏度優化");
+  Serial.println("新增: WiFi 定期重試 / NFC 快速重試 / PN532 自動復位");
   Serial.println("=========================================================");
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Serial.println("I2C 匯流排已於 GPIO 21 (SDA) 和 22 (SCL) 啟動。");
-  delay(400); 
-  nfcAdapter.begin();
-  
+  // --- FastLED 先初始化，才能顯示開機進度燈 ---
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS)
     .setCorrection(TypicalLEDStrip)
     .setDither(BRIGHTNESS < 255);
   FastLED.setBrightness(BRIGHTNESS);
   Serial.println("FastLED 燈條已初始化完成。");
-  
-  showStartupRainbow();
-  
+  showBootProgress(CRGB::Red, "系統 / FastLED 基礎初始化完成");   // 🔴 紅
+
+  // --- 啟動 I2C 匯流排 ---
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Serial.println("I2C 匯流排已於 GPIO 21 (SDA) 和 22 (SCL) 啟動。");
+  delay(400);
+  showBootProgress(CRGB::Orange, "I2C 匯流排就緒");               // 🟠 橙
+
+  // --- 初始化 NFC (PN532) ---
+  nfcAdapter.begin();
+  showBootProgress(CRGB::Yellow, "NFC PN532 就緒");               // 🟡 黃
+
+  // --- 初始化網路連線 ---
   Serial.println("\n📶 正在初始化網路連線...");
   mqttClientId = getMacAddress();
   Serial.print("🔧 MQTT Client ID: "); Serial.println(mqttClientId);
-  
+
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-  mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);  // 設定 MQTT keep-alive 為 15 秒
+  mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);  // 設定 MQTT keep-alive 為 60 秒
   Serial.print("🌐 MQTT Broker: "); Serial.print(MQTT_BROKER);
   Serial.print(":"); Serial.println(MQTT_PORT);
   Serial.print("🔧 MQTT Keep-Alive: "); Serial.print(MQTT_KEEPALIVE_SECONDS); Serial.println(" 秒");
-  
+
   connectToWiFi();
-  
   if (wifiConnected) {
+    showBootProgress(CRGB::Green, "WiFi 連線成功");               // 🟢 綠
     connectToMQTT();
+    if (mqttConnected) {
+      showBootProgress(CRGB::Blue, "MQTT 連線成功");             // 🔵 藍
+    }
   }
-  
+
+  showBootProgress(CRGB::Purple, "系統啟動完成");                 // 🟣 紫
+  delay(300);
+  showStartupRainbow();    // 🌈 最後以彩虹燈表示開機成功
+  bootInProgress = false;  // 開機進度燈結束，恢復待機/狀態燈邏輯
+
   currentState = STATE_IDLE;
   stateChangeTime = millis();
   lastConnectionCheck = millis();
   lastHeartbeat = millis();
-  
+
   Serial.println("\n🎯 系統初始化完成！");
   Serial.println("📊 當前狀態: IDLE (待機中)");
   Serial.println("💡 請將 NFC 標籤靠近讀卡器開始感應...");
   Serial.println("----------------------------------------------------");
   printConnectionStatus();
   printSystemStatus();
-  
+
   // 設定初始待機狀態燈
   updateIdleStatusLight();
 }
@@ -317,10 +373,24 @@ void connectToWiFi() {
   Serial.print("🔍 可用網路數量: "); Serial.println(WIFI_CREDENTIAL_COUNT);
   WiFi.disconnect(true); delay(100);
   WiFi.mode(WIFI_STA); delay(100);
+  WiFi.setSleep(false);  // 關閉 WiFi 省電模式，避免閒置時漏掉 MQTT keepalive 而斷線
+  WiFi.setAutoReconnect(true);  // [v1.6.0] 底層短暫斷線時自動重連，不必等 10 秒檢查週期
   wifiConnected = false; connectedCredentialIndex = -1;
+
+  // [v1.6.0] 優先嘗試上次成功的網路，大幅縮短執行期重連的阻塞時間
+  int tryOrder[WIFI_CREDENTIAL_COUNT];
+  int tryCount = 0;
+  if (lastSuccessfulCredentialIndex >= 0 && lastSuccessfulCredentialIndex < WIFI_CREDENTIAL_COUNT) {
+    tryOrder[tryCount++] = lastSuccessfulCredentialIndex;
+  }
   for (int i = 0; i < WIFI_CREDENTIAL_COUNT; i++) {
-    Serial.print("\n🔄 嘗試連接 ("); Serial.print(i + 1); Serial.print("/");
-    Serial.print(WIFI_CREDENTIAL_COUNT); Serial.print("): "); Serial.println(wifiCredentials[i].ssid);
+    if (i != lastSuccessfulCredentialIndex) tryOrder[tryCount++] = i;
+  }
+
+  for (int k = 0; k < tryCount; k++) {
+    int i = tryOrder[k];
+    Serial.print("\n🔄 嘗試連接 ("); Serial.print(k + 1); Serial.print("/");
+    Serial.print(tryCount); Serial.print("): "); Serial.println(wifiCredentials[i].ssid);
     WiFi.disconnect(false); delay(100);
     WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
     wifiConnectStartTime = millis();
@@ -334,13 +404,16 @@ void connectToWiFi() {
     }
     if (WiFi.status() == WL_CONNECTED) {
       wifiConnected = true; connectedCredentialIndex = i;
+      lastSuccessfulCredentialIndex = i;  // [v1.6.0] 記住成功的帳密，下次重連優先嘗試
       Serial.println("\n✅ WiFi 連線成功！");
       Serial.print("🌐 已連接網路: "); Serial.println(wifiCredentials[i].ssid);
       Serial.print("🌐 IP 地址: "); Serial.println(WiFi.localIP());
       Serial.print("📡 訊號強度: "); Serial.print(WiFi.RSSI()); Serial.println(" dBm");
 
-      // [新功能] 呼叫 WiFi 連線成功指示燈
-      showWiFiConnectedLight();
+      // [新功能] 執行期重連時顯示 WiFi 連線成功指示燈（開機期間改用開機進度燈）
+      if (!bootInProgress) {
+        showWiFiConnectedLight();
+      }
       
       // 清除網路操作標記並更新待機狀態燈
       isNetworkOperationInProgress = false;
@@ -359,9 +432,6 @@ void connectToWiFi() {
   isNetworkOperationInProgress = false;
 }
 
-// ... (其餘所有函數保持不變，為節省篇幅，此處省略) ...
-// (All other functions remain unchanged)
-
 // =========================================================================
 void handleCooldownState() {
   unsigned long currentTime = millis();
@@ -372,17 +442,34 @@ void handleCooldownState() {
       lastSentData = "";
     }
     printSystemStatus();
+    printStatistics();  // 每次感應冷卻結束時輸出累計統計
     changeSystemState(STATE_IDLE);
     // 冷卻結束，恢復待機狀態燈
     updateIdleStatusLight();
   }
 }
 int processTagData() {
+  // [v1.6.0] 讀取失敗時快速重試：卡片在感應邊緣常第一次失敗、第二次成功
+  for (int attempt = 1; attempt <= NFC_READ_ATTEMPTS; attempt++) {
   NfcTag tag = nfcAdapter.read();
   Serial.print("📱 標籤類型: "); Serial.println(tag.getTagType());
+
+  // [v1.6.0 Bug修正] 先確認標籤含 NDEF 訊息再取用，
+  // 否則空白卡/一般感應卡會使函式庫解參考 NULL 指標導致當機重啟
+  if (!tag.hasNdefMessage()) {
+    Serial.print("❌ 標籤不含 NDEF 訊息，或讀取失敗 (嘗試 ");
+    Serial.print(attempt); Serial.print("/"); Serial.print(NFC_READ_ATTEMPTS); Serial.println(")");
+    if (attempt < NFC_READ_ATTEMPTS && nfcAdapter.tagPresent(NFC_POLL_TIMEOUT)) {
+      delay(100);  // 卡片仍在場，短暫等待後快速重試
+      continue;
+    }
+    cooldownDuration = READ_FAIL_DEBOUNCE; isInCooldown = true; cooldownStartTime = millis();
+    return -1;
+  }
+
   NdefMessage message = tag.getNdefMessage();
   if (message.getRecordCount() <= 0) {
-    Serial.println("❌ 標籤不包含 NDEF 格式的訊息，或讀取失敗");
+    Serial.println("❌ 標籤 NDEF 訊息為空");
     cooldownDuration = READ_FAIL_DEBOUNCE; isInCooldown = true; cooldownStartTime = millis();
     return -1;
   }
@@ -435,6 +522,9 @@ int processTagData() {
     cooldownDuration = READ_FAIL_DEBOUNCE; isInCooldown = true; cooldownStartTime = millis();
     return -1;
   }
+  }  // end of retry for-loop（迴圈內所有路徑都會 return，此處僅為安全備援）
+  cooldownDuration = READ_FAIL_DEBOUNCE; isInCooldown = true; cooldownStartTime = millis();
+  return -1;
 }
 int extractNumber(String data, String prefix) {
   if (data.length() < prefix.length() + 1) return -1;
@@ -480,8 +570,23 @@ bool validateRecord3(String data) {
   }
   return (number >= 1 && number <= 120);
 }
+/**
+ * @brief 顯示開機進度指示燈：以約 20% 亮度填滿指定顏色，代表目前開機階段
+ * @param color    階段顏色 (紅→橙→黃→綠→藍→紫)
+ * @param stageMsg 該階段的文字說明
+ */
+void showBootProgress(CRGB color, const char* stageMsg) {
+  color.nscale8(51);  // 縮放至約 20% 亮度 (51/255)
+  fill_solid(leds, NUM_LEDS, color);
+  FastLED.show();
+  Serial.print("🔆 開機進度燈: "); Serial.println(stageMsg);
+  delay(BOOT_STAGE_DELAY);  // 讓每個階段的燈光清楚可見
+}
+/**
+ * @brief 開機成功彩虹燈：所有開機階段完成後顯示一次彩虹，代表開機成功
+ */
 void showStartupRainbow() {
-  Serial.print("顯示開機彩虹燈光指示 ("); Serial.print(STARTUP_LIGHT_DURATION); Serial.println(" 毫秒)...");
+  Serial.print("🌈 開機成功，顯示彩虹燈 ("); Serial.print(STARTUP_LIGHT_DURATION); Serial.println(" 毫秒)...");
   for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(i * (255 / NUM_LEDS), 255, 255);
   FastLED.show(); delay(STARTUP_LIGHT_DURATION);
   turnOffLeds(); Serial.println("開機燈光指示完成");
@@ -509,7 +614,9 @@ void processLightControl(int record2Number, int record3Number) {
 }
 String getPayloadAsString(NdefRecord& record) {
   String payloadString = ""; String recordType = record.getType();
-  int payloadLength = record.getPayloadLength(); byte payload[payloadLength];
+  int payloadLength = record.getPayloadLength();
+  if (payloadLength <= 0) return "";  // [v1.6.0] 防空 record 造成的越界讀取
+  byte payload[payloadLength];
   record.getPayload(payload);
   if (recordType == "U") {
     String prefix = "";
@@ -543,7 +650,9 @@ void handleIdleState() {
     }
   }
   
-  bool currentTagState = nfcAdapter.tagPresent();
+  // [v1.6.0] 指定 100ms 輪詢逾時：預設值每次可阻塞近 1 秒，
+  // 會拖慢主迴圈與 MQTT keepalive；縮短後迴圈更順、讀卡反應更快
+  bool currentTagState = nfcAdapter.tagPresent(NFC_POLL_TIMEOUT);
   unsigned long currentTime = millis();
   
   // 標籤狀態改變時重設計時器
@@ -561,7 +670,7 @@ void handleIdleState() {
 }
 void handleTagDetectedState() {
   // 再次確認標籤仍然存在且穩定
-  if (!nfcAdapter.tagPresent()) {
+  if (!nfcAdapter.tagPresent(NFC_POLL_TIMEOUT)) {
     Serial.println("⚠️ 標籤已移除，返回待機狀態");
     changeSystemState(STATE_IDLE);
     // 恢復待機狀態燈
@@ -576,7 +685,22 @@ void handleTagDetectedState() {
 void handleProcessingState() {
   Serial.println("⚡ 正在解析標籤資料...");
   int result = processTagData();
-  if (result > 0) { 
+
+  // [v1.6.0] 連續失敗自動復位：PN532 長時間運作偶爾會卡死（有回應但一直讀失敗），
+  // 連續失敗達上限就重新初始化，免除人工斷電
+  if (result >= 0) {
+    consecutiveReadFailures = 0;
+  } else {
+    consecutiveReadFailures++;
+    if (consecutiveReadFailures >= NFC_MAX_CONSECUTIVE_FAILURES) {
+      Serial.println("🔧 連續讀取失敗過多，重新初始化 PN532 模組...");
+      nfcAdapter.begin();
+      consecutiveReadFailures = 0;
+      Serial.println("🔧 PN532 重新初始化完成");
+    }
+  }
+
+  if (result > 0) {
     successfulReads++; 
     // 成功讀取且需要燈光控制，關閉待機狀態燈
     if (isIdleStatusLight) {
@@ -689,8 +813,16 @@ void checkMQTTConnection() {
     if (wifiConnected) {
       wifiConnected = false; mqttConnected = false; connectedCredentialIndex = -1;
       Serial.println("⚠️  WiFi 連線中斷，嘗試重新連線...");
+      lastWiFiRetryAttempt = millis();
       connectToWiFi();  // 此函數內會設定 isNetworkOperationInProgress
       if (wifiConnected) connectToMQTT();  // 此函數內也會設定標記
+    } else if (millis() - lastWiFiRetryAttempt >= WIFI_RETRY_INTERVAL) {
+      // [v1.6.0 Bug修正] 開機時 WiFi 全部失敗後也要定期重試
+      // （原本只在「曾連線過」時才重連，開機即失敗會導致永遠離線）
+      Serial.println("🔁 WiFi 離線中，執行定期重試連線...");
+      lastWiFiRetryAttempt = millis();
+      connectToWiFi();
+      if (wifiConnected) connectToMQTT();
     }
     return;
   } else if (!wifiConnected) {
@@ -746,15 +878,21 @@ void sendHeartbeat() {
     return;
   }
   
-  // 建立心跳訊息內容
+  // 建立心跳訊息內容（帶上 IP、WiFi 訊號強度 RSSI 與連線的 SSID）
   String heartbeatTopic = "puffin-heartbeat";
-  String heartbeatPayload = "{\"device\":\"" + mqttClientId + "\",\"status\":\"alive\",\"timestamp\":" + String(millis()) + "}";
+  String ssid = (connectedCredentialIndex >= 0) ? String(wifiCredentials[connectedCredentialIndex].ssid) : "";
+  String heartbeatPayload = "{\"device\":\"" + mqttClientId +
+    "\",\"status\":\"alive\",\"ip\":\"" + WiFi.localIP().toString() +
+    "\",\"rssi\":" + String(WiFi.RSSI()) +
+    ",\"ssid\":\"" + ssid +
+    "\",\"timestamp\":" + String(millis()) + "}";
   
   // 發送心跳訊息
   if (mqttClient.publish(heartbeatTopic.c_str(), heartbeatPayload.c_str())) {
     Serial.println("💗 心跳訊息已發送 -> " + heartbeatTopic);
   } else {
-    Serial.println("💔 心跳訊息發送失敗");
+    Serial.println("💔 心跳訊息發送失敗，標記 MQTT 斷線以觸發重連");
+    mqttConnected = false;  // [v1.6.0] 發送失敗視為斷線，下一輪連線檢查（≤10 秒）立即重連
   }
 }
 
@@ -763,6 +901,10 @@ void sendHeartbeat() {
  * @brief 更新待機狀態燈光：根據網路連線狀態決定燈光顯示
  */
 void updateIdleStatusLight() {
+  // 開機進度燈顯示期間，不干擾待機燈邏輯
+  if (bootInProgress) {
+    return;
+  }
   // 只在 IDLE 狀態且沒有正在顯示燈光時才更新待機狀態燈
   if (currentState != STATE_IDLE || isLightOn) {
     return;
