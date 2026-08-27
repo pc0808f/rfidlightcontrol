@@ -394,12 +394,13 @@ void connectToWiFi() {
     WiFi.disconnect(false); delay(100);
     WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
     wifiConnectStartTime = millis();
+    unsigned long lastResetAttemptTime = wifiConnectStartTime;
     while (WiFi.status() != WL_CONNECTED && WiFi.status() != WL_CONNECT_FAILED && (millis() - wifiConnectStartTime < WIFI_CONNECT_TIMEOUT)) {
       delay(500); Serial.print(".");
-      if (WiFi.status() == WL_DISCONNECTED && (millis() - wifiConnectStartTime > 5000)) {
+      if (WiFi.status() == WL_DISCONNECTED && (millis() - lastResetAttemptTime > 5000)) {
         Serial.print("⚠️重置"); WiFi.disconnect(false); delay(500);
         WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
-        wifiConnectStartTime = millis();
+        lastResetAttemptTime = millis();
       }
     }
     if (WiFi.status() == WL_CONNECTED) {
