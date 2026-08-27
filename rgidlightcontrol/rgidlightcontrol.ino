@@ -1,7 +1,7 @@
 /**
- * NFC RFID 燈光控制系統 - v1.6.0 穩定性強化版
+ * NFC RFID 燈光控制系統 - v1.7.0 互動燈光模式版
  *
- * 版本資訊: v1.6.0 - 連線與讀卡穩定性全面強化
+ * 版本資訊: v1.7.0 - 新增 App 遙控互動燈光模式 (puffin-control)
  * 建立日期: 2025-08-28
  * 更新內容:
  * - v1.5.7: 新增 MQTT 重連保護機制，防止狀態機重置
@@ -20,6 +20,13 @@
  * - v1.6.0: NFC 讀取失敗先快速重試 2 次再進冷卻，提升一次刷卡成功率
  * - v1.6.0: 連續讀取失敗 5 次自動重新初始化 PN532（防模組卡死）
  * - v1.6.0: getPayloadAsString 防 payload 長度為 0 的越界讀取
+ * - v1.6.1: [Bug修正] WiFi 連線內層「卡住 5 秒重置」不再重設外層 15 秒逾時計時，
+ *           避免 WiFi 一直連不上時卡死在重連迴圈（⚠️重置無限循環）
+ * - v1.7.0: 新增互動燈光模式：訂閱 puffin-control，App 可遙控
+ *           INTERACTIVE_START（全暗待命）/ MODE1_START（8 秒白光漸亮漸暗至 50%）/
+ *           MODE2_START（7 秒單顆隨機星光殘影漸暗）/ INTERACTIVE_EXIT（緊急退出）
+ * - v1.7.0: 互動模式中暫停 NFC 掃描與待機燈更新，退出後自動恢復；
+ *           獨立 InteractiveState 狀態機，不動原本五狀態機與 puffin-test 邏輯
  *
  * 已實作功能：
  * 1. FastLED 燈條控制功能
@@ -35,6 +42,7 @@
  * 11. WiFi 連線成功指示燈 (執行期重連時顯示粉紅色)
  * 12. 待機狀態燈 (網路正常時顯示 50% 白光)
  * 13. 標籤處理統計資訊輸出
+ * 14. App 遙控互動燈光模式 (訂閱 puffin-control，模式一/模式二燈效)
  *
  * 開機進度燈說明 (皆為約 20% 亮度)：
  * - 🔴 紅: 系統 / FastLED 基礎初始化完成
@@ -96,6 +104,7 @@ const int WIFI_CREDENTIAL_COUNT = sizeof(wifiCredentials) / sizeof(wifiCredentia
 const char* MQTT_BROKER = "MQTTGO.io";
 const int MQTT_PORT = 1883;
 const char* MQTT_TOPIC = "puffin-test";
+const char* MQTT_CONTROL_TOPIC = "puffin-control";  // 互動燈光模式控制指令（App 端發送，字串須與 App 完全一致）
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 const unsigned long MQTT_CONNECT_TIMEOUT = 5000;
 const unsigned long CONNECTION_CHECK_INTERVAL = 10000;
@@ -177,6 +186,30 @@ unsigned long lastHeartbeat = 0;
 // --- NFC 穩定性變數 ---
 int consecutiveReadFailures = 0;  // 連續讀取失敗計數（達上限即重新初始化 PN532）
 
+// --- 互動燈光模式參數 ---
+const unsigned long MODE1_DURATION = 8000;       // 模式一總長（毫秒）
+const unsigned long MODE1_FADE_IN_TIME = 5000;   // 模式一漸亮時間（0~5 秒漸亮，之後漸暗）
+const unsigned long MODE2_DURATION = 7000;       // 模式二總長（毫秒）
+const uint8_t MODE1_PEAK_BRIGHTNESS = 128;       // 模式一最亮亮度（約 50%）
+const unsigned long MODE2_FADE_INTERVAL = 25;    // 模式二殘影淡出的更新間隔（毫秒）
+const uint8_t MODE2_FADE_AMOUNT = 20;            // 模式二每次淡出的幅度（越大殘影消失越快，約 1.2 秒淡完）
+
+// --- 互動燈光模式狀態變數（與 NFC 狀態機完全獨立，不共用變數）---
+enum InteractiveState {
+  INTERACTIVE_IDLE,          // 一般待機，NFC 正常掃描
+  INTERACTIVE_WAITING_MODE1, // 已進入互動模式，燈已關，等待「模式一」指令
+  INTERACTIVE_MODE1_RUNNING, // 模式一動作中（8 秒漸亮漸暗）
+  INTERACTIVE_WAITING_MODE2, // 模式一結束，等待「模式二」指令
+  INTERACTIVE_MODE2_RUNNING  // 模式二動作中（7 秒隨機燈光）
+};
+InteractiveState interactiveState = INTERACTIVE_IDLE;
+unsigned long mode1StartTime = 0;
+unsigned long mode2StartTime = 0;
+uint8_t mode1LastBrightness = 255;      // 上次模式一顯示的亮度（值沒變就不重複 show）
+unsigned long mode2LastChangeTime = 0;
+unsigned long mode2NextInterval = 0;
+unsigned long mode2LastFadeTime = 0;    // 上次殘影淡出更新的時間
+
 // --- 函數宣告 ---
 void showBootProgress(CRGB color, const char* stageMsg);
 void showStartupRainbow();
@@ -208,13 +241,19 @@ void publishToMQTT(String topic, String payload);
 void sendHeartbeat();
 void updateIdleStatusLight();
 void showIdleStatusLight();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+void handleInteractiveMode();
+void exitInteractiveMode(const char* reason);
+void resetNfcStateMachine();
+void runMode1Animation();
+void runMode2RandomLeds();
 
 // =========================================================================
 void setup(void) {
   Serial.begin(115200);
-  Serial.println("\nNFC RFID 燈光控制系統 v1.6.0 (穩定性強化版)");
+  Serial.println("\nNFC RFID 燈光控制系統 v1.7.0 (互動燈光模式版)");
   Serial.println("=========================================================");
-  Serial.println("新增: WiFi 定期重試 / NFC 快速重試 / PN532 自動復位");
+  Serial.println("新增: App 遙控互動燈光模式 (puffin-control)");
   Serial.println("=========================================================");
 
   // --- FastLED 先初始化，才能顯示開機進度燈 ---
@@ -242,6 +281,7 @@ void setup(void) {
 
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);  // 設定 MQTT keep-alive 為 60 秒
+  mqttClient.setCallback(mqttCallback);  // 接收 puffin-control 互動模式指令
   Serial.print("🌐 MQTT Broker: "); Serial.print(MQTT_BROKER);
   Serial.print(":"); Serial.println(MQTT_PORT);
   Serial.print("🔧 MQTT Keep-Alive: "); Serial.print(MQTT_KEEPALIVE_SECONDS); Serial.println(" 秒");
@@ -293,12 +333,18 @@ void loop(void) {
     lastHeartbeat = currentTime;
   }
   
-  switch (currentState) {
-    case STATE_IDLE:         handleIdleState();        break;
-    case STATE_TAG_DETECTED: handleTagDetectedState(); break;
-    case STATE_PROCESSING:   handleProcessingState();  break;
-    case STATE_LIGHT_ON:     handleLightOnState();     break;
-    case STATE_COOLDOWN:     handleCooldownState();    break;
+  if (interactiveState == INTERACTIVE_IDLE) {
+    // 原本的 NFC 狀態機，完全不變
+    switch (currentState) {
+      case STATE_IDLE:         handleIdleState();        break;
+      case STATE_TAG_DETECTED: handleTagDetectedState(); break;
+      case STATE_PROCESSING:   handleProcessingState();  break;
+      case STATE_LIGHT_ON:     handleLightOnState();     break;
+      case STATE_COOLDOWN:     handleCooldownState();    break;
+    }
+  } else {
+    // 互動燈光模式進行中，暫停 NFC 掃描
+    handleInteractiveMode();
   }
   
   // 維持 MQTT 客戶端運作
@@ -790,6 +836,12 @@ void connectToMQTT() {
     if (mqttClient.connect(mqttClientId.c_str())) {
       mqttConnected = true; Serial.println("\n✅ MQTT 連線成功！");
       Serial.print("🔧 Client ID: "); Serial.println(mqttClientId);
+      // 每次連線成功都要重新訂閱（斷線重連後訂閱會失效）
+      if (mqttClient.subscribe(MQTT_CONTROL_TOPIC)) {
+        Serial.print("📥 已訂閱控制主題: "); Serial.println(MQTT_CONTROL_TOPIC);
+      } else {
+        Serial.println("⚠️ 訂閱控制主題失敗，互動模式指令將收不到");
+      }
     } else {
       Serial.print("❌ 連線失敗，錯誤代碼: "); Serial.print(mqttClient.state());
       Serial.println("，2 秒後重試..."); delay(2000);
@@ -906,6 +958,10 @@ void updateIdleStatusLight() {
   if (bootInProgress) {
     return;
   }
+  // 互動燈光模式進行中，不讓待機燈蓋掉燈效（連線檢查等處會呼叫本函式）
+  if (interactiveState != INTERACTIVE_IDLE) {
+    return;
+  }
   // 只在 IDLE 狀態且沒有正在顯示燈光時才更新待機狀態燈
   if (currentState != STATE_IDLE || isLightOn) {
     return;
@@ -934,4 +990,140 @@ void showIdleStatusLight() {
   CRGB idleColor = CRGB(127, 127, 127);
   fill_solid(leds, NUM_LEDS, idleColor);
   FastLED.show();
+}
+
+// =========================================================================
+// 互動燈光模式（由 App 透過 puffin-control 指令驅動，與 NFC 流程完全獨立）
+/**
+ * @brief MQTT 訊息回呼：只分流處理 puffin-control 的互動模式指令
+ */
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (String(topic) != MQTT_CONTROL_TOPIC) return;
+
+  // payload 沒有結尾 \0，須依 length 逐字組字串
+  String cmd = "";
+  for (unsigned int i = 0; i < length; i++) cmd += (char)payload[i];
+  Serial.print("🎛️ 收到互動模式指令: "); Serial.println(cmd);
+
+  // INTERACTIVE_EXIT 優先權最高：不檢查目前狀態，任何時候收到都立刻生效（主持人緊急退出鍵）
+  if (cmd == "INTERACTIVE_EXIT") {
+    exitInteractiveMode("🚪 離開互動模式，恢復 NFC 待機");
+  }
+  // INTERACTIVE_START 刻意不檢查狀態：MQTT 無送達保證，App 端允許主持人重按補送
+  else if (cmd == "INTERACTIVE_START") {
+    resetNfcStateMachine();
+    turnOffLeds();
+    isIdleStatusLight = false;
+    interactiveState = INTERACTIVE_WAITING_MODE1;
+    Serial.println("🎛️ 已進入互動模式，燈已全暗，等待「模式一」指令（NFC 掃描暫停）");
+  }
+  else if (cmd == "MODE1_START" && interactiveState == INTERACTIVE_WAITING_MODE1) {
+    interactiveState = INTERACTIVE_MODE1_RUNNING;
+    mode1StartTime = millis();
+    mode1LastBrightness = 255;  // 設成不可能的初始值，確保第一幀就更新
+    Serial.println("💡 模式一開始：8 秒白光漸亮漸暗");
+  }
+  else if (cmd == "MODE2_START" && interactiveState == INTERACTIVE_WAITING_MODE2) {
+    interactiveState = INTERACTIVE_MODE2_RUNNING;
+    mode2StartTime = millis();
+    mode2LastChangeTime = 0; mode2NextInterval = 0;  // 一進入就馬上點亮第一顆
+    mode2LastFadeTime = 0;
+    Serial.println("✨ 模式二開始：7 秒單顆隨機星光");
+  }
+  // 其餘狀態下收到不該收到的指令，直接忽略
+}
+
+/**
+ * @brief 進入互動模式前重置 NFC 狀態機，避免退出後接續跑到一半的舊狀態
+ */
+void resetNfcStateMachine() {
+  isLightOn = false;
+  isInCooldown = false;
+  lastTagState = false;
+  changeSystemState(STATE_IDLE);
+}
+
+/**
+ * @brief 退出互動模式：關燈、回到一般待機、恢復 NFC 掃描與待機狀態燈
+ */
+void exitInteractiveMode(const char* reason) {
+  turnOffLeds();
+  interactiveState = INTERACTIVE_IDLE;
+  isIdleStatusLight = false;
+  Serial.println(reason);
+  updateIdleStatusLight();  // 網路正常時恢復 50% 白色待機燈
+}
+
+/**
+ * @brief 主迴圈的互動模式處理：非阻塞計時，等待狀態不做事
+ */
+void handleInteractiveMode() {
+  switch (interactiveState) {
+    case INTERACTIVE_MODE1_RUNNING:
+      runMode1Animation();
+      if (millis() - mode1StartTime >= MODE1_DURATION) {
+        turnOffLeds();
+        interactiveState = INTERACTIVE_WAITING_MODE2;
+        Serial.println("💡 模式一結束，等待「模式二」指令");
+      }
+      break;
+
+    case INTERACTIVE_MODE2_RUNNING:
+      runMode2RandomLeds();
+      if (millis() - mode2StartTime >= MODE2_DURATION) {
+        exitInteractiveMode("✨ 模式二結束，自動恢復 NFC 待機");
+      }
+      break;
+
+    // INTERACTIVE_WAITING_MODE1 / INTERACTIVE_WAITING_MODE2：純等待指令
+    default:
+      break;
+  }
+}
+
+/**
+ * @brief 模式一燈效：0~5 秒白光線性漸亮到 50%，5~8 秒線性漸暗回全暗
+ */
+void runMode1Animation() {
+  unsigned long elapsed = millis() - mode1StartTime;
+  uint8_t brightness;
+
+  if (elapsed <= MODE1_FADE_IN_TIME) {
+    brightness = map(elapsed, 0, MODE1_FADE_IN_TIME, 0, MODE1_PEAK_BRIGHTNESS);
+  } else {
+    unsigned long fadeElapsed = elapsed - MODE1_FADE_IN_TIME;
+    unsigned long fadeOutTime = MODE1_DURATION - MODE1_FADE_IN_TIME;
+    if (fadeElapsed > fadeOutTime) fadeElapsed = fadeOutTime;
+    brightness = map(fadeElapsed, 0, fadeOutTime, MODE1_PEAK_BRIGHTNESS, 0);
+  }
+
+  // 亮度沒變就不重送燈條資料，減少不必要的 FastLED.show()
+  if (brightness != mode1LastBrightness) {
+    fill_solid(leds, NUM_LEDS, CRGB(brightness, brightness, brightness));
+    FastLED.show();
+    mode1LastBrightness = brightness;
+  }
+}
+
+/**
+ * @brief 模式二燈效：每 150~400ms 隨機點亮一顆隨機色的燈，舊燈以殘影慢慢淡出
+ *        （多顆星光同時閃爍漸暗的魔幻感，非整串同色、也非高頻爆閃）
+ */
+void runMode2RandomLeds() {
+  unsigned long now = millis();
+
+  // 全體逐步淡出，做出殘影漸暗的星光尾巴
+  if (now - mode2LastFadeTime >= MODE2_FADE_INTERVAL) {
+    fadeToBlackBy(leds, NUM_LEDS, MODE2_FADE_AMOUNT);
+    FastLED.show();
+    mode2LastFadeTime = now;
+  }
+
+  // 每隔隨機間隔點亮一顆新的隨機燈（CHSV 全飽和，顏色鮮豔不混濁）
+  if (now - mode2LastChangeTime >= mode2NextInterval) {
+    leds[random(0, NUM_LEDS)] = CHSV(random(0, 256), 255, 255);
+    FastLED.show();
+    mode2LastChangeTime = now;
+    mode2NextInterval = random(150, 400);
+  }
 }
