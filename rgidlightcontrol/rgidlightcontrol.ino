@@ -100,6 +100,7 @@ struct WiFiCredential {
   const char* password;
 };
 const WiFiCredential wifiCredentials[] = {
+  {"TDS", "333999888"},                    // 上誠老師的手機熱點（現場就近供 WiFi，避免行動電源+弱訊號的電源問題）
   {"HPEES_Internal", "Hpees2733"},
   {"Sam", "0928666624"},
   {"Sam&Betty", "0928666624"},
