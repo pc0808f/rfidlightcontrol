@@ -118,7 +118,7 @@ Arduino wemos d1 r32 (ESP32) 專案：活動現場的互動燈光裝置。參加
 | `CLAUDE.md` | 編譯環境需求（FQBN、Partition Scheme、函式庫版本與安裝眉角）、程式架構說明 |
 | `ver.md` | v1.6.0 以前的詳細版本歷史 |
 | `firmware/v1.7.1/` | 量產燒錄包：bin 檔 + `flash.bat` + 燒錄說明 |
-| `PN532-PN532_HSU/` | elechouse/PN532 函式庫原始 repo 備份（未入版控） |
+| `PN532-PN532_HSU/` | elechouse/PN532 函式庫的實測快照（**已入版控**——上游無版本號可釘且久未維護，這份是唯一保證編譯得過的來源；安裝時把其中 `PN532`、`PN532_I2C`、`NDEF` 等子資料夾分別複製到 Arduino `libraries/`） |
 
 ### 上手三步驟
 
