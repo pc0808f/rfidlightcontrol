@@ -1,7 +1,7 @@
 /**
- * NFC RFID 燈光控制系統 - v1.7.0 互動燈光模式版
+ * NFC RFID 燈光控制系統 - v1.7.1 互動燈光模式版
  *
- * 版本資訊: v1.7.0 - 新增 App 遙控互動燈光模式 (puffin-control)
+ * 版本資訊: v1.7.1 - 新增板載 LED 狀態指示（行動電源供電無 log 時判斷模式）
  * 建立日期: 2025-08-28
  * 更新內容:
  * - v1.5.7: 新增 MQTT 重連保護機制，防止狀態機重置
@@ -27,6 +27,11 @@
  *           MODE2_START（7 秒單顆隨機星光殘影漸暗）/ INTERACTIVE_EXIT（緊急退出）
  * - v1.7.0: 互動模式中暫停 NFC 掃描與待機燈更新，退出後自動恢復；
  *           獨立 InteractiveState 狀態機，不動原本五狀態機與 puffin-test 邏輯
+ * - v1.7.1: 模式二改為 7 秒蓄力爆發：星光點亮速度與密度隨時間加速，
+ *           6 秒時全條閃白定格全亮（提升遠距離觀看的視覺效果）
+ * - v1.7.1: 新增板載 LED (GPIO2, UNO D13 位置) 狀態指示：
+ *           恆亮=待機掃描正常 / 慢閃=互動模式中 / 快閃=WiFi 或 MQTT 連線異常，
+ *           阻塞重連期間 LED 也保持閃爍以區分「重連中」與「當機」
  *
  * 已實作功能：
  * 1. FastLED 燈條控制功能
@@ -193,6 +198,10 @@ const unsigned long MODE2_DURATION = 7000;       // 模式二總長（毫秒）
 const uint8_t MODE1_PEAK_BRIGHTNESS = 128;       // 模式一最亮亮度（約 50%）
 const unsigned long MODE2_FADE_INTERVAL = 25;    // 模式二殘影淡出的更新間隔（毫秒）
 const uint8_t MODE2_FADE_AMOUNT = 20;            // 模式二每次淡出的幅度（越大殘影消失越快，約 1.2 秒淡完）
+const unsigned long MODE2_BURST_TIME = 6000;         // 模式二蓄力階段長度，時間到全條閃白定格全亮
+const unsigned long MODE2_SPARK_INTERVAL_START = 300; // 蓄力開始時的點燈間隔（毫秒，稀疏慢閃）
+const unsigned long MODE2_SPARK_INTERVAL_END = 15;    // 接近爆發時的點燈間隔（毫秒，全條狂閃）
+const int MODE2_MAX_SPARKS_PER_TICK = 5;              // 接近爆發時每次額外多點亮的顆數上限
 
 // --- 互動燈光模式狀態變數（與 NFC 狀態機完全獨立，不共用變數）---
 enum InteractiveState {
@@ -209,6 +218,16 @@ uint8_t mode1LastBrightness = 255;      // 上次模式一顯示的亮度（值�
 unsigned long mode2LastChangeTime = 0;
 unsigned long mode2NextInterval = 0;
 unsigned long mode2LastFadeTime = 0;    // 上次殘影淡出更新的時間
+bool mode2BurstShown = false;           // 爆發閃白是否已顯示（只需 show 一次後定格）
+
+// --- 板載狀態指示 LED（WEMOS D1 R32 板載藍色 LED，GPIO2，UNO 佈局 D13 位置）---
+// 行動電源供電看不到 Serial log 時，靠這顆 LED 判斷目前模式：
+//   恆亮 = 待機掃描模式（正常）；慢閃 = 互動模式中；快閃 = WiFi/MQTT 連線異常
+const int STATUS_LED_PIN = 2;                            // 板載藍色 LED 固定在 GPIO2（不用 LED_BUILTIN，通用 ESP32 板定義沒有它）
+const unsigned long STATUS_LED_INTERACTIVE_BLINK = 500;  // 互動模式：慢閃半週期（毫秒）
+const unsigned long STATUS_LED_ERROR_BLINK = 150;        // 連線異常：快閃半週期（毫秒）
+unsigned long statusLedLastToggle = 0;
+bool statusLedOn = false;
 
 // --- 函數宣告 ---
 void showBootProgress(CRGB color, const char* stageMsg);
@@ -247,13 +266,17 @@ void exitInteractiveMode(const char* reason);
 void resetNfcStateMachine();
 void runMode1Animation();
 void runMode2RandomLeds();
+void updateStatusLed();
+void statusLedBlink(unsigned long halfPeriod);
 
 // =========================================================================
 void setup(void) {
   Serial.begin(115200);
-  Serial.println("\nNFC RFID 燈光控制系統 v1.7.0 (互動燈光模式版)");
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, LOW);
+  Serial.println("\nNFC RFID 燈光控制系統 v1.7.1 (互動燈光模式版)");
   Serial.println("=========================================================");
-  Serial.println("新增: App 遙控互動燈光模式 (puffin-control)");
+  Serial.println("新增: App 遙控互動燈光模式 / 板載 LED 狀態指示");
   Serial.println("=========================================================");
 
   // --- FastLED 先初始化，才能顯示開機進度燈 ---
@@ -319,7 +342,11 @@ void setup(void) {
 // =========================================================================
 void loop(void) {
   unsigned long currentTime = millis();
-  
+
+  // 板載 LED 狀態指示（恆亮=待機掃描 / 慢閃=互動模式 / 快閃=連線異常）
+  updateStatusLed();
+
+
   if (currentTime - lastConnectionCheck >= CONNECTION_CHECK_INTERVAL) {
     checkMQTTConnection();
     lastConnectionCheck = currentTime;
@@ -443,6 +470,7 @@ void connectToWiFi() {
     unsigned long lastResetAttemptTime = wifiConnectStartTime;
     while (WiFi.status() != WL_CONNECTED && WiFi.status() != WL_CONNECT_FAILED && (millis() - wifiConnectStartTime < WIFI_CONNECT_TIMEOUT)) {
       delay(500); Serial.print(".");
+      statusLedBlink(STATUS_LED_ERROR_BLINK);  // 阻塞重連期間板載 LED 保持閃爍，表示重連進行中而非當機
       if (WiFi.status() == WL_DISCONNECTED && (millis() - lastResetAttemptTime > 5000)) {
         Serial.print("⚠️重置"); WiFi.disconnect(false); delay(500);
         WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
@@ -844,7 +872,9 @@ void connectToMQTT() {
       }
     } else {
       Serial.print("❌ 連線失敗，錯誤代碼: "); Serial.print(mqttClient.state());
-      Serial.println("，2 秒後重試..."); delay(2000);
+      Serial.println("，2 秒後重試...");
+      statusLedBlink(STATUS_LED_ERROR_BLINK);  // 阻塞重連期間維持 LED 動作
+      delay(2000);
     }
   }
   if (!mqttClient.connected()) { 
@@ -1028,7 +1058,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     mode2StartTime = millis();
     mode2LastChangeTime = 0; mode2NextInterval = 0;  // 一進入就馬上點亮第一顆
     mode2LastFadeTime = 0;
-    Serial.println("✨ 模式二開始：7 秒單顆隨機星光");
+    mode2BurstShown = false;
+    Serial.println("✨ 模式二開始：7 秒蓄力爆發（星光加速 → 閃白定格全亮）");
   }
   // 其餘狀態下收到不該收到的指令，直接忽略
 }
@@ -1106,24 +1137,68 @@ void runMode1Animation() {
 }
 
 /**
- * @brief 模式二燈效：每 150~400ms 隨機點亮一顆隨機色的燈，舊燈以殘影慢慢淡出
- *        （多顆星光同時閃爍漸暗的魔幻感，非整串同色、也非高頻爆閃）
+ * @brief 板載狀態指示 LED：依「異常 > 互動模式 > 待機」優先序決定顯示
+ */
+void updateStatusLed() {
+  if (!wifiConnected || !mqttConnected) {
+    statusLedBlink(STATUS_LED_ERROR_BLINK);        // 連線異常：快閃
+  } else if (interactiveState != INTERACTIVE_IDLE) {
+    statusLedBlink(STATUS_LED_INTERACTIVE_BLINK);  // 互動模式：慢閃
+  } else if (!statusLedOn) {
+    digitalWrite(STATUS_LED_PIN, HIGH);            // 待機掃描模式：恆亮
+    statusLedOn = true;
+  }
+}
+
+/**
+ * @brief 以指定半週期非阻塞閃爍板載 LED
+ */
+void statusLedBlink(unsigned long halfPeriod) {
+  unsigned long now = millis();
+  if (now - statusLedLastToggle >= halfPeriod) {
+    statusLedOn = !statusLedOn;
+    digitalWrite(STATUS_LED_PIN, statusLedOn ? HIGH : LOW);
+    statusLedLastToggle = now;
+  }
+}
+
+/**
+ * @brief 模式二燈效：7 秒蓄力爆發
+ *        0~6 秒：隨機星光（殘影漸暗）點亮速度與密度隨時間加速，從稀疏慢閃到全條狂閃
+ *        6~7 秒：全條閃白定格全亮，做出魔法蓄力到爆發的效果
  */
 void runMode2RandomLeds() {
   unsigned long now = millis();
+  unsigned long elapsed = now - mode2StartTime;
 
-  // 全體逐步淡出，做出殘影漸暗的星光尾巴
+  // 爆發階段：全條閃白定格，維持到模式結束
+  if (elapsed >= MODE2_BURST_TIME) {
+    if (!mode2BurstShown) {
+      fill_solid(leds, NUM_LEDS, CRGB::White);
+      FastLED.show();
+      mode2BurstShown = true;
+      Serial.println("💥 蓄力完成，全條閃白定格！");
+    }
+    return;
+  }
+
+  // 蓄力階段：全體逐步淡出，做出殘影漸暗的星光尾巴
   if (now - mode2LastFadeTime >= MODE2_FADE_INTERVAL) {
     fadeToBlackBy(leds, NUM_LEDS, MODE2_FADE_AMOUNT);
     FastLED.show();
     mode2LastFadeTime = now;
   }
 
-  // 每隔隨機間隔點亮一顆新的隨機燈（CHSV 全飽和，顏色鮮豔不混濁）
+  // 點亮新星光：間隔隨時間線性縮短、每次點亮顆數隨時間增加（CHSV 全飽和，顏色鮮豔）
   if (now - mode2LastChangeTime >= mode2NextInterval) {
-    leds[random(0, NUM_LEDS)] = CHSV(random(0, 256), 255, 255);
+    int sparksThisTick = 1 + (int)((elapsed * MODE2_MAX_SPARKS_PER_TICK) / MODE2_BURST_TIME);
+    for (int s = 0; s < sparksThisTick; s++) {
+      leds[random(0, NUM_LEDS)] = CHSV(random(0, 256), 255, 255);
+    }
     FastLED.show();
     mode2LastChangeTime = now;
-    mode2NextInterval = random(150, 400);
+    unsigned long baseInterval = MODE2_SPARK_INTERVAL_START
+      - (elapsed * (MODE2_SPARK_INTERVAL_START - MODE2_SPARK_INTERVAL_END)) / MODE2_BURST_TIME;
+    mode2NextInterval = random(baseInterval / 2, baseInterval + 1);  // 帶點隨機抖動，閃得更自然
   }
 }
